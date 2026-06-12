@@ -2,61 +2,50 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Global Catch-All Deny
-    match /{document=**} {
-      allow read, write: if false;
-    }
-
-    // Helper functions
+    // Global helper functions
     function isSignedIn() {
       return request.auth != null;
-    }
-
-    function isOwner(uid) {
-      return isSignedIn() && request.auth.uid == uid;
     }
 
     function isAdmin() {
       return isSignedIn() && (
         request.auth.token.email == "bdwalletagent@gmail.com" ||
-        exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        (exists(/databases/$(database)/documents/agents/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/agents/$(request.auth.uid)).data.role == "admin")
       );
     }
 
     // Rule for user/agent profiles
     match /agents/{uid} {
-      allow get: if isSignedIn() && (request.auth.uid == uid || isAdmin());
-      allow list: if isSignedIn() && isAdmin();
-      allow create: if isSignedIn() && request.auth.uid == uid;
-      allow update: if isSignedIn() && (request.auth.uid == uid || isAdmin());
-      allow delete: if isSignedIn() && isAdmin();
+      allow read, write: if isSignedIn() && (request.auth.uid == uid || isAdmin());
     }
 
     // Rule for Transactions
     match /transactions/{transactionId} {
-      allow get: if isSignedIn() && (resource.data.agentId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && (resource.data.agentId == request.auth.uid || isAdmin());
-      allow create: if isSignedIn() && request.resource.data.agentId == request.auth.uid;
-      allow update: if isSignedIn() && (resource.data.agentId == request.auth.uid || isAdmin());
-      allow delete: if isSignedIn() && isAdmin();
+      allow read, write: if isSignedIn() && (
+        isAdmin() ||
+        (resource == null && request.resource.data.agentId == request.auth.uid) ||
+        (resource != null && resource.data.agentId == request.auth.uid)
+      );
     }
 
     // Rule for Agent Cash Requests (Deposits into their own Agent account)
     match /agentCashRequests/{requestId} {
-      allow get: if isSignedIn() && (resource.data.agentId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && (resource.data.agentId == request.auth.uid || isAdmin());
-      allow create: if isSignedIn() && request.resource.data.agentId == request.auth.uid;
-      allow update: if isSignedIn() && (resource.data.agentId == request.auth.uid || isAdmin());
-      allow delete: if isSignedIn() && isAdmin();
+      allow read, write: if isSignedIn() && (
+        isAdmin() ||
+        (resource == null && request.resource.data.agentId == request.auth.uid) ||
+        (resource != null && resource.data.agentId == request.auth.uid)
+      );
     }
 
     // Rule for Agent Withdraw Requests (Withdrawing their earned commission)
     match /agentWithdrawRequests/{requestId} {
-      allow get: if isSignedIn() && (resource.data.agentId == request.auth.uid || isAdmin());
-      allow list: if isSignedIn() && (resource.data.agentId == request.auth.uid || isAdmin());
-      allow create: if isSignedIn() && request.resource.data.agentId == request.auth.uid;
-      allow update: if isSignedIn() && (resource.data.agentId == request.auth.uid || isAdmin());
-      allow delete: if isSignedIn() && isAdmin();
+      allow read, write: if isSignedIn() && (
+        isAdmin() ||
+        (resource == null && request.resource.data.agentId == request.auth.uid) ||
+        (resource != null && resource.data.agentId == request.auth.uid)
+      );
     }
 
     // Admin profiles lookup
