@@ -1,0 +1,6 @@
+{
+  "name": "E-Wallet Agent",
+  "description": "A professional E-Wallet Agent mobile application simulation for digital wallet operations, Cash In, Cash Out, recharge, bill payments, and earning commissions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

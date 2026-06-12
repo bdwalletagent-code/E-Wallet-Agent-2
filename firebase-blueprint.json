@@ -1,0 +1,92 @@
+{
+  "entities": {
+    "Agent": {
+      "title": "Agent",
+      "description": "Represents an E-Wallet partner agent and their current balances.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "User id of the agent" },
+        "name": { "type": "string", "description": "Agent's full name" },
+        "email": { "type": "string", "description": "Email address" },
+        "phone": { "type": "string", "description": "Mobile number" },
+        "walletBalance": { "type": "number", "description": "Agent wallet balance in BDT" },
+        "commissionBalance": { "type": "number", "description": "Agent commission balance in BDT" },
+        "todayTransactions": { "type": "number", "description": "Transaction count today" },
+        "todayEarnings": { "type": "number", "description": "Earnings today in BDT" },
+        "monthlyEarnings": { "type": "number", "description": "Earnings this month in BDT" },
+        "totalEarnings": { "type": "number", "description": "Total earnings in BDT" },
+        "role": { "type": "string", "description": "User role: agent or admin" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["uid", "name", "email", "walletBalance", "commissionBalance", "role"]
+    },
+    "Transaction": {
+      "title": "Transaction",
+      "description": "Represents an e-wallet operation like deposit, withdraw, recharge, or bill pay.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "agentId": { "type": "string" },
+        "type": { "type": "string", "enum": ["deposit", "withdraw", "recharge", "bill_pay"] },
+        "customerPhone": { "type": "string" },
+        "amount": { "type": "number" },
+        "commissionEarned": { "type": "number" },
+        "status": { "type": "string", "enum": ["pending", "approved", "cancelled"] },
+        "details": { "type": "string" },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "agentId", "type", "amount", "status", "createdAt"]
+    },
+    "AgentCashRequest": {
+      "title": "AgentCashRequest",
+      "description": "Request by agent to load BDT into their wallet by sending USD/BDT via bKash/Nagad.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "agentId": { "type": "string" },
+        "agentName": { "type": "string" },
+        "amountBdt": { "type": "number" },
+        "paymentMethod": { "type": "string" },
+        "transactionId": { "type": "string" },
+        "screenshotUrl": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "agentId", "amountBdt", "paymentMethod", "transactionId", "status", "createdAt"]
+    },
+    "AgentWithdrawRequest": {
+      "title": "AgentWithdrawRequest",
+      "description": "Request by agent to cash out commission balance via bKash/Nagad.",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "agentId": { "type": "string" },
+        "agentName": { "type": "string" },
+        "amountBdt": { "type": "number" },
+        "paymentMethod": { "type": "string" },
+        "paymentNumber": { "type": "string" },
+        "status": { "type": "string", "enum": ["pending", "approved", "rejected"] },
+        "createdAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "agentId", "amountBdt", "paymentMethod", "paymentNumber", "status", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/agents/{uid}": {
+      "schema": "Agent",
+      "description": "Store individual agent profile records"
+    },
+    "/transactions/{transactionId}": {
+      "schema": "Transaction",
+      "description": "Logs of transactions processed or generated for caching"
+    },
+    "/agentCashRequests/{requestId}": {
+      "schema": "AgentCashRequest",
+      "description": "Agent wallet balance purchase/funding requests"
+    },
+    "/agentWithdrawRequests/{requestId}": {
+      "schema": "AgentWithdrawRequest",
+      "description": "Agent commission withdrawal requests"
+    }
+  }
+}
