@@ -2471,11 +2471,11 @@ export default function App() {
                   <div className="grid grid-cols-2 gap-2 mt-1.5 text-[11px] font-mono font-bold">
                     <div className="bg-white p-2.5 rounded-xl border border-slate-150 text-indigo-700">
                       <span className="text-[9px] block text-slate-400 font-sans font-medium">বিকাশ Personal :</span>
-                      01799244455
+                      01717-508278
                     </div>
                     <div className="bg-white p-2.5 rounded-xl border border-slate-150 text-rose-700">
                       <span className="text-[9px] block text-slate-400 font-sans font-medium">নগদ Personal :</span>
-                      01912444550
+                      01717-508278
                     </div>
                   </div>
                 </div>
