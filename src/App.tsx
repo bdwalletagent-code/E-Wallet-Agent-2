@@ -132,6 +132,7 @@ export default function App() {
   const [billerName, setBillerName] = useState('DESCO Electricity');
   const [billMeterNo, setBillMeterNo] = useState('');
   const [agentCashAmount, setAgentCashAmount] = useState('');
+  const [agentCashAccountId, setAgentCashAccountId] = useState('');
   const [agentCashSenderPhone, setAgentCashSenderPhone] = useState('');
   const [agentCashMethod, setAgentCashMethod] = useState<'bKash' | 'Nagad'>('bKash');
   const [agentCashTxnId, setAgentCashTxnId] = useState('');
@@ -142,6 +143,10 @@ export default function App() {
   const [withdrawNumber, setWithdrawNumber] = useState('');
   const [withdrawMethod, setWithdrawMethod] = useState<'bKash' | 'Nagad'>('bKash');
   const [withdrawSource, setWithdrawSource] = useState<'commission' | 'wallet'>('commission');
+  const [refillType, setRefillType] = useState<'super_agent' | 'admin_100'>('super_agent');
+  const [adminRefillTxnId, setAdminRefillTxnId] = useState('');
+  const [adminRefillSender, setAdminRefillSender] = useState('');
+  const [adminRefillMethod, setAdminRefillMethod] = useState<'bKash' | 'Nagad'>('bKash');
 
   // Receipts / Modals state
   const [showReceipt, setShowReceipt] = useState<TransactionRecord | null>(null);
@@ -163,6 +168,7 @@ export default function App() {
     const unsubscribe = onAuthStateChanged(auth, async (user) => {
       setCurrentUser(user);
       if (user) {
+        setAgentCashAccountId(user.uid);
         // Real-time synchronization of the current user profile from Firestore
         const userRef = doc(db, 'agents', user.uid);
         const unsubscribeProfile = onSnapshot(userRef, async (snap) => {
@@ -267,6 +273,7 @@ export default function App() {
         };
       } else {
         setProfile(null);
+        setAgentCashAccountId('');
         setDbTransactions([]);
         setCashRequests([]);
         setWithdrawRequests([]);
@@ -363,16 +370,27 @@ export default function App() {
   // Let's filter pool requests that are still pending
   const pendingPreloaded = allPreloaded.filter(t => !processedTxIds.has(t.id));
   
-  // Distribute pending lists based on current wallet balance
+  // Find the last completed/approved/cancelled deposit transaction
+  const lastProcessedDeposit = dbTransactions.find(t => t.type === 'deposit');
+  const lastProcessedDepositTime = lastProcessedDeposit ? new Date(lastProcessedDeposit.createdAt).getTime() : 0;
+  
+  // Cooldown delay of 35 seconds (satisfies the "30 to 45 seconds" requested range)
+  const DEPOSIT_UNLOCK_DELAY = 35 * 1000; 
+  const depositTimeRemaining = lastProcessedDepositTime ? Math.max(0, Math.ceil((lastProcessedDepositTime + DEPOSIT_UNLOCK_DELAY - tickTime) / 1000)) : 0;
+
+  // Distribute pending lists based on current wallet balance, with a 30-45 second cooldown between requests
   const getVisiblePendingDeposits = () => {
+    if (depositTimeRemaining > 0) {
+      return [];
+    }
+
     let tempBalance = activeWalletBal;
     const result: TransactionRecord[] = [];
     const pendingDeps = pendingPreloaded.filter(t => t.type === 'deposit');
     for (const req of pendingDeps) {
       if (tempBalance >= req.amount) {
         result.push(req);
-        tempBalance -= req.amount;
-      } else {
+        // Show only one active deposit request at a time
         break;
       }
     }
@@ -413,6 +431,16 @@ export default function App() {
   const approvedWithdrawals = dbTransactions.filter(t => t.type === 'withdraw' && t.status === 'approved');
   const cancelledWithdrawals = dbTransactions.filter(t => t.type === 'withdraw' && t.status === 'cancelled');
   const pendingWithdrawalsCount = visiblePendingWithdrawals.length;
+
+  // Calculate if the agent has a commission withdrawal request in the last 7 days
+  const lastCommissionWithdraw = currentUser
+    ? withdrawRequests.find(r =>
+        r.agentId === currentUser.uid &&
+        r.withdrawSource === 'commission' &&
+        r.status !== 'rejected' &&
+        new Date(r.createdAt).getTime() >= (tickTime - 7 * 24 * 60 * 60 * 1000)
+      )
+    : null;
 
   // Trigger system notification when a new preloaded deposit request is unlocked
   useEffect(() => {
@@ -940,32 +968,38 @@ export default function App() {
     }
   };
 
-  // Submit Agent Cash (Agent Top Up Request) - Min $10 (1200 BDT)
+  // Submit Agent Cash (Agent Top Up Request) - Simplified with Account ID & Amount, supporting Super Agent and Admin 100% modes
   const handleAgentCashRequestSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser || !profile) return;
 
     const bdtAmount = Number(agentCashAmount);
-    if (isNaN(bdtAmount) || bdtAmount < 1200) {
-      triggerMessage('নূন্যতম রিফিল ১০$ সমপরিমাণ ১২০০ টাকা (1200 BDT) হতে হবে!', 'error');
+    if (isNaN(bdtAmount) || bdtAmount <= 0) {
+      triggerMessage('সঠিক টাকার পরিমাণ দিন।', 'error');
       return;
     }
 
-    if (!agentCashSenderPhone || agentCashSenderPhone.length < 11) {
-      triggerMessage('সঠিক ১১ ডিজিটের মোবাইল নম্বর দিন।', 'error');
+    if (!agentCashAccountId.trim()) {
+      triggerMessage('সঠিক এজেন্ট একাউন্ট আইডি দিন।', 'error');
       return;
     }
 
-    if (!agentCashTxnId) {
-      triggerMessage('বিকাশ বা নগদ ট্রানজেকশন আইডি (TxnID) দিন।', 'error');
-      return;
+    if (refillType === 'admin_100') {
+      if (!adminRefillSender.trim() || adminRefillSender.length < 11) {
+        triggerMessage('সঠিক ১১ ডিজিটের সেন্ডার নম্বর দিন।', 'error');
+        return;
+      }
+      if (!adminRefillTxnId.trim()) {
+        triggerMessage('টাকার ট্রানজেকশন আইডি (TxID) প্রদান করুন।', 'error');
+        return;
+      }
     }
 
-    const requestId = `CASH-${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
-    const cleanScreenshot = screenshotFileBase64 || screenshotUrl || 'https://images.unsplash.com/photo-1559526324-4b87b5e36e44?q=80&w=200&auto=format&fit=crop';
+    const requestId = `${refillType === 'admin_100' ? 'ADMIN' : 'CASH'}-${Math.random().toString(36).substring(2, 9).toUpperCase()}`;
+    const cleanScreenshot = 'https://images.unsplash.com/photo-1559526324-4b87b5e36e44?q=80&w=200&auto=format&fit=crop';
     
-    // Choose a random auto-approve delay between 30 to 60 seconds
-    const randomDelay = Math.floor(Math.random() * 31) + 30; // 30 to 60 seconds
+    // Exactly 1 minute delay (60 seconds) for automatic approval
+    const approveDelay = 60; 
 
     try {
       const newRequest: AgentCashRequest = {
@@ -973,10 +1007,10 @@ export default function App() {
         agentId: currentUser.uid,
         agentName: profile.name,
         amountBdt: bdtAmount,
-        paymentMethod: agentCashMethod,
-        transactionId: agentCashTxnId,
-        senderPhone: agentCashSenderPhone,
-        autoApproveDelay: randomDelay,
+        paymentMethod: refillType === 'admin_100' ? adminRefillMethod : 'bKash',
+        transactionId: refillType === 'admin_100' ? adminRefillTxnId : agentCashAccountId,
+        senderPhone: refillType === 'admin_100' ? adminRefillSender : agentCashAccountId,
+        autoApproveDelay: approveDelay,
         screenshotUrl: cleanScreenshot,
         status: 'pending',
         createdAt: new Date().toISOString()
@@ -985,20 +1019,24 @@ export default function App() {
       await setDoc(doc(db, 'agentCashRequests', requestId), newRequest);
       
       setAgentCashAmount('');
-      setAgentCashSenderPhone('');
-      setAgentCashTxnId('');
-      setScreenshotUrl('');
-      setScreenshotFileName('');
-      setScreenshotFileBase64('');
+      if (refillType === 'admin_100') {
+        setAdminRefillTxnId('');
+        setAdminRefillSender('');
+      }
       
       setActiveFeature('none');
-      triggerMessage('আপনার রিফিল আবেদন জমা হয়েছে! এটি ৩০ সেকেন্ড থেকে ১ মিনিটের মধ্যে অটো এপ্রুভ হয়ে যাবে।', 'success');
+      
+      if (refillType === 'admin_100') {
+        triggerMessage('আপনার ১০০% কমিশন রিফিল অনুরোধ সফলভাবে সাবমিট করা হয়েছে! অনুগ্রহ করে স্ক্রিনশটটি সরাসরি Super Admin এর কাছে পাঠিয়ে দিন।', 'success');
+      } else {
+        triggerMessage('আপনার ব্যালেন্স রিফিল অনুরোধ সফলভাবে Super Agent এর নিকট পাঠানো হয়েছে! অনুগ্রহ করে স্ক্রিনশটটি কপি করে অফিসিয়াল টেলিগ্রামে পাঠিয়ে দিন।', 'success');
+      }
     } catch (err: any) {
       triggerMessage('রিকোয়েস্ট জমা ত্রুটি: ' + err.message, 'error');
     }
   };
 
-  // Submit Agent Withdraw (Commission Cash Out)
+  // Submit Agent Withdraw (Commission Cash Out) - Limited to once per week for commission
   const handleAgentWithdrawRequestSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!currentUser || !profile) return;
@@ -1014,14 +1052,35 @@ export default function App() {
       return;
     }
 
+    if (withdrawSource === 'wallet') {
+      triggerMessage('দুঃখিত! মূল ওয়ালেট ব্যালেন্স থেকে কোনো প্রকার উত্তোলন বা উইথড্র করার অনুমতি নেই।', 'error');
+      return;
+    }
+
     if (withdrawSource === 'commission') {
-      if (profile.commissionBalance < bdtAmount) {
-        triggerMessage(`আপনার কমিশন ব্যালেন্স অপর্যাপ্ত! সর্বোচ্চ ৳${profile.commissionBalance} উত্তোলন সম্ভব।`, 'error');
+      const now = Date.now();
+      const sevenDaysAgo = now - 7 * 24 * 60 * 60 * 1000;
+      const recentCommissionWithdraw = withdrawRequests.find(r => 
+        r.agentId === currentUser.uid && 
+        r.withdrawSource === 'commission' &&
+        r.status !== 'rejected' &&
+        new Date(r.createdAt).getTime() >= sevenDaysAgo
+      );
+
+      if (recentCommissionWithdraw) {
+        const nextAllowedDate = new Date(new Date(recentCommissionWithdraw.createdAt).getTime() + 7 * 24 * 60 * 60 * 1000);
+        triggerMessage(`দুঃখিত! আপনি সপ্তাহে কেবল একবারই কমিশন উত্তোলন করতে পারেন। পরবর্তী উত্তোলন সম্ভব হবেঃ ${nextAllowedDate.toLocaleDateString('bn-BD')} তারিখের পর।`, 'error');
         return;
       }
-    } else {
-      if (profile.walletBalance < bdtAmount) {
-        triggerMessage(`আপনার মূল ওয়ালেট ব্যালেন্স অপর্যাপ্ত! সর্বোচ্চ ৳${profile.walletBalance} উত্তোলন সম্ভব।`, 'error');
+
+      const maxWithdrawLimit = Math.floor(profile.commissionBalance * 0.3 * 100) / 100;
+      if (bdtAmount > maxWithdrawLimit) {
+        triggerMessage(`সীমাবদ্ধতা লঙ্ঘন! আপনি আপনার মোট কমিশন ব্যালেন্সের সর্বোচ্চ ৩০% (৳${maxWithdrawLimit}) উত্তোলন করতে পারবেন।`, 'error');
+        return;
+      }
+
+      if (profile.commissionBalance < bdtAmount) {
+        triggerMessage(`আপনার কমিশন ব্যালেন্স অপর্যাপ্ত!`, 'error');
         return;
       }
     }
@@ -1911,6 +1970,145 @@ export default function App() {
                           <span>ওয়ালেট ক্যাশ রিফিল করুন</span>
                         </button>
                       </div>
+                    ) : depositTimeRemaining > 0 ? (
+                      <div className="bg-slate-50 rounded-2xl p-4 border border-slate-200 text-center py-5 space-y-4">
+                        {/* Live player deposit submission simulation wrapper */}
+                        <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+                          <h4 className="font-extrabold text-sm text-slate-800 flex items-center gap-1.5">
+                            <span className="w-2 h-2 rounded-full bg-indigo-600 animate-ping"></span>
+                            লাইভ ডিপোজিট ট্র্যাকার
+                          </h4>
+                          <span className="text-[10px] font-bold text-indigo-700 bg-indigo-50 px-2 py-0.5 rounded-full uppercase tracking-wider animate-pulse border border-indigo-150">
+                            প্লেয়ার লাইভ সাবমিশন
+                          </span>
+                        </div>
+
+                        {/* Interactive steps simulating live customer activity */}
+                        <div className="space-y-3 text-left text-xs bg-white p-3.5 rounded-xl border border-slate-150">
+                          
+                          {/* Step 1 */}
+                          <div className="flex items-start gap-2.5">
+                            <div className="mt-0.5 shrink-0">
+                              {depositTimeRemaining > 26 ? (
+                                <div className="w-5 h-5 rounded-full bg-indigo-50 border border-indigo-300 flex items-center justify-center text-indigo-700 font-black text-[10px] animate-pulse">
+                                  ১
+                                </div>
+                              ) : (
+                                <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0" />
+                              )}
+                            </div>
+                            <div className="flex-1">
+                              <p className={`font-bold text-[11px] ${depositTimeRemaining > 26 ? 'text-indigo-950 font-extrabold' : 'text-slate-400 line-through'}`}>
+                                ১. খেলোয়াড় ক্যাশ-ইন সম্পন্ন করছে
+                              </p>
+                              <p className="text-[10px] text-slate-450 leading-normal font-medium mt-0.5">
+                                একজন খেলোয়াড়/গ্রাহক তার নিজের ওয়ালেট অ্যাকাউন্টে টাকা ডিপোজিট করার জন্য স্ক্রিনে প্রদর্শিত Super Agent নম্বরে ক্যাশ-ইন করছে।
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Step 2 */}
+                          <div className="flex items-start gap-2.5">
+                            <div className="mt-0.5 shrink-0">
+                              {depositTimeRemaining > 26 ? (
+                                <div className="w-5 h-5 rounded-full bg-slate-50 border border-slate-200 flex items-center justify-center text-slate-400 font-bold text-[10px]">
+                                  ২
+                                </div>
+                              ) : depositTimeRemaining > 17 ? (
+                                <div className="w-5 h-5 rounded-full bg-indigo-50 border border-indigo-300 flex items-center justify-center text-indigo-700 font-black text-[10px] animate-pulse">
+                                  ২
+                                </div>
+                              ) : (
+                                <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0" />
+                              )}
+                            </div>
+                            <div className="flex-1">
+                              <p className={`font-bold text-[11px] ${depositTimeRemaining <= 26 && depositTimeRemaining > 17 ? 'text-indigo-950 font-extrabold' : depositTimeRemaining <= 17 ? 'text-slate-400 line-through' : 'text-slate-400'}`}>
+                                ২. গ্রাহকের ট্রানজেকশন আইডি ইনপুট
+                              </p>
+                              <p className="text-[10px] text-slate-450 leading-normal font-medium mt-0.5">
+                                গ্রাহক সফল টাকা পাঠানোর মোবাইল মেসেজ থেকে তার ১১ ডিজিটের মোবাইল নম্বর এবং ট্রানজেকশন আইডি দেখে ফর্মে ইনপুট দিচ্ছে।
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Step 3 */}
+                          <div className="flex items-start gap-2.5">
+                            <div className="mt-0.5 shrink-0">
+                              {depositTimeRemaining > 17 ? (
+                                <div className="w-5 h-5 rounded-full bg-slate-50 border border-slate-200 flex items-center justify-center text-slate-400 font-bold text-[10px]">
+                                  ৩
+                                </div>
+                              ) : depositTimeRemaining > 8 ? (
+                                <div className="w-5 h-5 rounded-full bg-indigo-50 border border-indigo-300 flex items-center justify-center text-indigo-700 font-black text-[10px] animate-pulse">
+                                  ৩
+                                </div>
+                              ) : (
+                                <CheckCircle className="w-5 h-5 text-emerald-600 shrink-0" />
+                              )}
+                            </div>
+                            <div className="flex-1">
+                              <p className={`font-bold text-[11px] ${depositTimeRemaining <= 17 && depositTimeRemaining > 8 ? 'text-indigo-950 font-extrabold' : depositTimeRemaining <= 8 ? 'text-slate-400 line-through' : 'text-slate-400'}`}>
+                                ৩. গেটওয়ে ডেটা ম্যাচিং প্রসেস
+                              </p>
+                              <p className="text-[10px] text-slate-450 leading-normal font-medium mt-0.5">
+                                কাস্টমারের জমা দেওয়া ডেটা সুপার এজেন্টের রিয়েলটাইম নোটিফিকেশন সিস্টেমের সাথে ডাটাবেজ দ্বারা যাচাই করা হচ্ছে।
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Step 4 */}
+                          <div className="flex items-start gap-2.5">
+                            <div className="mt-0.5 shrink-0">
+                              {depositTimeRemaining > 8 ? (
+                                <div className="w-5 h-5 rounded-full bg-slate-50 border border-slate-200 flex items-center justify-center text-slate-400 font-bold text-[10px]">
+                                  ৪
+                                </div>
+                              ) : (
+                                <div className="w-5 h-5 rounded-full bg-amber-50 border border-amber-300 flex items-center justify-center text-amber-700 font-bold text-[10px] animate-spin">
+                                  <RefreshCw className="w-3 h-3 text-amber-600" />
+                                </div>
+                              )}
+                            </div>
+                            <div className="flex-1">
+                              <p className={`font-bold text-[11px] ${depositTimeRemaining <= 8 ? 'text-indigo-950 font-extrabold' : 'text-slate-400'}`}>
+                                ৪. ড্যাশবোর্ডে ডিপোজিট অনুরোধ ফরওয়ার্ড
+                              </p>
+                              <p className="text-[10px] text-slate-450 leading-normal font-medium mt-0.5">
+                                ট্রানজেকশন ম্যাচিং সম্পন্ন! অনুরোধটি সরাসরি আপনার ওয়ালেট এজেন্ট সিস্টেমে স্থানান্তর করা হচ্ছে।
+                              </p>
+                            </div>
+                          </div>
+
+                        </div>
+
+                        {/* Beautifully explained guide card according to user requirement */}
+                        <div className="bg-amber-50 border border-amber-200 text-amber-950 text-xs text-left p-3.5 rounded-xl space-y-2 leading-relaxed">
+                          <p className="font-extrabold text-amber-950 flex items-center gap-1.5 border-b border-amber-200 pb-1.5">
+                            <Info className="w-4 h-4 text-amber-700 shrink-0" />
+                            ওয়ালেট এজেন্টের মূল কাজ ও দায়িত্ব:
+                          </p>
+                          <div className="text-[11px] font-semibold text-slate-700 space-y-1.5">
+                            <p className="leading-relaxed">
+                              সুপার এজেন্টের কাছে খেলোয়াড়/গ্রাহকের পাঠানো ও সাবমিট করা ডিপোজিট অনুরোধটি স্ক্রিনে আসার পর নিচে উল্লেখিত ৩টি বিষয় পুঙ্খানুপুঙ্খভাবে যাচাই করুন:
+                            </p>
+                            <ul className="list-disc list-inside space-y-1 pl-1 text-slate-850 font-bold">
+                              <li>
+                                <span className="text-indigo-800">গ্রাহক নম্বর ভেরিফিকেশন:</span> মোবাইল নাম্বারটি অবশ্যই ১১ ডিজিটের হতে হবে। কিছু টেস্ট অনুরোধে ১০ ডিজিট থাকবে যাতে ভুল দেখলেই আপনি <span className="text-red-600 font-black">বাতিল</span> করতে পারেন।
+                              </li>
+                              <li>
+                                <span className="text-indigo-800">নোটিফিকেশন ও ডিপোজিট মিলানো:</span> রিসিভড মেসেজের টাকার পরিমাণের সাথে ডিপোজিট অনুরোধের পরিমাণ সঠিক আছে কিনা তা মিলিয়ে দেখুন।
+                              </li>
+                              <li>
+                                <span className="text-indigo-800">কমিশন ট্র্যাকিং:</span> প্রতিটি সফল লেনদেনের বিপরীতে অর্জিত কমিশন লাভ সঠিকভাবে যুক্ত হচ্ছে কিনা তা দেখে সিদ্ধান্ত গ্রহণ করুন।
+                              </li>
+                            </ul>
+                            <p className="text-[10px] text-amber-800 font-bold mt-1">
+                              ⚠️ সতর্ক থাকুন, খেলোয়াড়ের কোনো ভুল ১০-ডিজিট নম্বর কিংবা অলীক বা অসঙ্গতিপূর্ণ অনুরোধ দেখলে সাথে সাথে তা বাতিল করে দিন।
+                            </p>
+                          </div>
+                        </div>
+                      </div>
                     ) : visiblePendingDeposits.length === 0 ? (
                       <div className="bg-indigo-50 rounded-2xl p-4 border border-indigo-100 text-indigo-900 text-center py-6 space-y-2">
                         <CheckCircle className="w-8 h-8 text-indigo-500 mx-auto" />
@@ -2457,177 +2655,169 @@ export default function App() {
               <div className="bg-white rounded-3xl p-5 border border-slate-100 shadow-sm text-left space-y-4">
                 <div className="flex items-center justify-between border-b border-slate-50 pb-2">
                   <div>
-                    <h3 className="text-sm font-bold text-slate-800">ওয়ালেট ব্যালেন্স রিফিল (Refill Agent Account)</h3>
-                    <span className="text-[10px] text-slate-400 block">কমপক্ষে ১০$ (১২০০ টাকা) রিফিল আবেদন করুন</span>
+                    <h3 className="text-sm font-bold text-slate-800">
+                      {refillType === 'admin_100' ? '১০০% কমিশন রিফিল (Super Admin বিবরণ)' : 'ওয়ালেট ব্যালেন্স রিফিল (Refill Agent Account)'}
+                    </h3>
+                    <span className="text-[10px] text-slate-400 block">
+                      {refillType === 'admin_100' ? '১০০% কমিশন সচল করতে সরাসরি সুপার এডমিন বিকাশ/নগদে ব্যালেন্স রিফিল' : 'আপনার কাস্টম এজেন্ট ওয়ালেটে ব্যালেন্স রিফিল অনুরোধ পাঠান'}
+                    </span>
                   </div>
-                  <button onClick={() => setActiveFeature('none')} className="p-1 rounded-full bg-slate-100 hover:bg-slate-200 cursor-pointer">
+                  <button onClick={() => { setActiveFeature('none'); setRefillType('super_agent'); }} className="p-1 rounded-full bg-slate-100 hover:bg-slate-200 cursor-pointer">
                     <X className="w-4 h-4" />
                   </button>
                 </div>
 
-                <div className="bg-slate-50 rounded-2xl p-3 border border-slate-100 space-y-2 text-xs">
-                  <p className="font-bold text-slate-700">টাকা পাঠানোর এডমিন বিবরণ :</p>
-                  <p className="text-slate-600">নিচে প্রদানকৃত বিকাশ বা নগদ নম্বরে <strong>Sent Money</strong> করুন এবং ট্রানজেকশন আইডি কপি করে নিন:</p>
-                  <div className="grid grid-cols-2 gap-2 mt-1.5 text-[11px] font-mono font-bold">
-                    <div className="bg-white p-2.5 rounded-xl border border-slate-150 text-indigo-700">
-                      <span className="text-[9px] block text-slate-400 font-sans font-medium">বিকাশ Personal :</span>
-                      01717-508278
+                {/* Switcher Option when in Super Agent mode */}
+                {refillType === 'super_agent' ? (
+                  <div 
+                    onClick={() => setRefillType('admin_100')}
+                    className="bg-indigo-50/85 hover:bg-indigo-100 border border-indigo-200 rounded-2xl p-3.5 text-xs text-left cursor-pointer transition-all space-y-1"
+                  >
+                    <p className="font-extrabold text-indigo-900 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5">
+                        <Info className="w-4 h-4 text-indigo-700 shrink-0" />
+                        টাকা পাঠানোর এডমিন বিবরণ (১০০% কমিশন পেতে)
+                      </span>
+                      <span className="text-[9px] bg-[#E2125B] text-white px-2 py-0.5 rounded font-black uppercase tracking-wider animate-pulse">ক্লিক করুন</span>
+                    </p>
+                    <p className="text-[11px] text-indigo-950 font-medium leading-relaxed">
+                      💡 যদি আপনারা নিজেদের ফিজিক্যাল/ডিজিটাল অর্থ বা পুঁজি দিয়ে ডিপোজিটের উপরে <strong>সম্পূর্ণ ১০০% কমিশন লাভ ও উত্তোলন</strong> করতে চান, তবে এখানে ক্লিক করে এডমিন নাম্বারে টাকা প্রসেস করুন।
+                    </p>
+                  </div>
+                ) : (
+                  <div className="bg-rose-50 border border-rose-200 rounded-2xl p-3.5 text-xs text-left space-y-2">
+                    <div className="flex items-center justify-between">
+                      <p className="font-extrabold text-rose-800 flex items-center gap-1.5">
+                        <Info className="w-4 h-4 text-rose-700 shrink-0" />
+                        ১০০% কমিশন পাওয়ার এডমিন পেমেন্ট বিবরণ:
+                      </p>
+                      <button 
+                        onClick={() => setRefillType('super_agent')}
+                        className="text-[10px] font-black text-indigo-700 bg-white border border-indigo-200 px-2.5 py-1 rounded-lg hover:bg-indigo-50"
+                      >
+                        ← সুপার এজেন্ট রিফিল এ ফিরুন
+                      </button>
                     </div>
-                    <div className="bg-white p-2.5 rounded-xl border border-slate-150 text-rose-700">
-                      <span className="text-[9px] block text-slate-400 font-sans font-medium">নগদ Personal :</span>
-                      01717-508278
+                    <p className="text-[11px] text-slate-700 font-medium leading-relaxed">
+                      নিচে প্রদানকৃত বিকাশ বা নগদ নাম্বারে আপনার <strong>ব্যক্তিগত পুঁজি/অর্থ থেকে Send Money / Cash in</strong> সম্পন্ন করুন এবং নিচের ১০০% রিফিল অনুরোধ ফর্মটি পূরণ করে সাবমিট করুন।
+                    </p>
+                    <div className="grid grid-cols-2 gap-2 mt-1.5 text-[11px] font-mono font-bold">
+                      <div className="bg-white p-2.5 rounded-xl border border-rose-150 text-rose-700">
+                        <span className="text-[9px] block text-slate-400 font-sans font-medium">বিকাশ Personal (Admin) :</span>
+                        01717-508278
+                      </div>
+                      <div className="bg-white p-2.5 rounded-xl border border-rose-150 text-indigo-700">
+                        <span className="text-[9px] block text-slate-400 font-sans font-medium">নগদ Personal (Admin) :</span>
+                        01717-508278
+                      </div>
                     </div>
                   </div>
-                </div>
+                )}
 
+                {/* Form Render */}
                 <form onSubmit={handleAgentCashRequestSubmit} className="space-y-4">
                   <div>
-                    <label className="text-[10px] font-extrabold text-slate-600 block mb-1 uppercase tracking-wider">১. পেমেন্ট গেটওয়ে নির্বাচন করুন</label>
-                    <div className="grid grid-cols-2 gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setAgentCashMethod('bKash')}
-                        className={`py-2 px-3 rounded-xl text-xs font-black border transition-all cursor-pointer ${
-                          agentCashMethod === 'bKash' ? 'bg-indigo-50 border-indigo-600 text-indigo-700' : 'bg-slate-50 border-slate-200 text-slate-600'
-                        }`}
-                      >
-                        bKash (বিকাশ)
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setAgentCashMethod('Nagad')}
-                        className={`py-2 px-3 rounded-xl text-xs font-black border transition-all cursor-pointer ${
-                          agentCashMethod === 'Nagad' ? 'bg-orange-50 border-orange-600 text-orange-700' : 'bg-slate-50 border-slate-200 text-slate-600'
-                        }`}
-                      >
-                        Nagad (নগদ)
-                      </button>
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="text-[10px] font-extrabold text-slate-600 block mb-1 uppercase tracking-wider">২. মোবাইল নম্বর (যে নম্বর থেকে টাকা পাঠিয়েছেন)</label>
+                    <label className="text-[10px] font-extrabold text-slate-600 block mb-1 uppercase tracking-wider">
+                      ১. এজেন্ট একাউন্ট আইডি (Agent Account ID)
+                    </label>
                     <input 
-                      type="tel" 
-                      value={agentCashSenderPhone}
-                      onChange={(e) => setAgentCashSenderPhone(e.target.value)}
-                      placeholder="01XXXXXXXXX"
+                      type="text" 
+                      value={agentCashAccountId}
+                      onChange={(e) => setAgentCashAccountId(e.target.value)}
+                      placeholder="এজেন্ট একাউন্ট আইডি"
                       required
-                      maxLength={11}
                       className="w-full text-slate-800 text-sm py-2.5 px-4 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-1 focus:ring-rose-500 font-mono" 
                     />
                   </div>
 
                   <div>
-                    <label className="text-[10px] font-extrabold text-slate-600 block mb-1 uppercase tracking-wider">৩. টাকার পরিমাণ (কমপক্ষে ১২০০ টাকা)</label>
+                    <label className="text-[10px] font-extrabold text-slate-600 block mb-1 uppercase tracking-wider">
+                      ২. টাকার পরিমাণ (৳) / Amount in BDT
+                    </label>
                     <input 
                       type="number" 
                       value={agentCashAmount}
                       onChange={(e) => setAgentCashAmount(e.target.value)}
-                      placeholder="টাকার পরিমাণ (যেমন ১২০০ BDT)"
+                      placeholder="যেমন ১২০০ BDT"
                       required
                       className="w-full text-slate-800 text-sm py-2.5 px-4 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none focus:ring-1 focus:ring-rose-500" 
                     />
-                    {agentCashAmount && Number(agentCashAmount) >= 1200 && (
-                      <span className="text-[10px] text-emerald-600 font-extrabold block mt-1">
-                        সমপরিমাণ ডলার হিসাব: ${(Number(agentCashAmount) / 120).toFixed(2)} USD (রেট: ১$ = ১২০ টাকা)
-                      </span>
-                    )}
                   </div>
 
-                  <div>
-                    <label className="text-[10px] font-extrabold text-slate-600 block mb-1 uppercase tracking-wider">৪. সঠিক ট্রানজেকশন আইডি (TxnID)</label>
-                    <input 
-                      type="text" 
-                      value={agentCashTxnId}
-                      onChange={(e) => setAgentCashTxnId(e.target.value)}
-                      placeholder="যেমন 9K54DFST7R"
-                      required
-                      className="w-full text-slate-800 text-xs py-2.5 px-4 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none font-mono focus:ring-1 focus:ring-rose-500" 
-                    />
-                  </div>
+                  {refillType === 'admin_100' && (
+                    <div className="grid grid-cols-2 gap-2 anim-fade-in">
+                      <div>
+                        <label className="text-[10px] font-extrabold text-slate-600 block mb-1 uppercase tracking-wider">
+                          ৩. পেমেন্ট মেথড (Method)
+                        </label>
+                        <select
+                          value={adminRefillMethod}
+                          onChange={(e) => setAdminRefillMethod(e.target.value as 'bKash' | 'Nagad')}
+                          className="w-full text-slate-800 text-xs py-2.5 px-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none"
+                        >
+                          <option value="bKash">bKash (বিকাশ)</option>
+                          <option value="Nagad">Nagad (নগদ)</option>
+                        </select>
+                      </div>
 
-                  <div>
-                    <label className="text-[10px] font-extrabold text-slate-600 block mb-1 uppercase tracking-wider">৫. লেনদেন স্ক্রিনশট সংযুক্ত করুন (bKash/Nagad Screenshot)</label>
-                    
-                    {/* Visual File Upload Dropzone */}
-                    <div className="mt-1 flex flex-col items-center justify-center border-2 border-dashed border-slate-200 rounded-2xl p-4 bg-slate-50 hover:bg-slate-100 transition-colors relative">
-                      <input 
-                        type="file" 
-                        accept="image/*"
-                        onChange={(e) => {
-                          const file = e.target.files?.[0];
-                          if (file) {
-                            setScreenshotFileName(file.name);
-                            const reader = new FileReader();
-                            reader.onloadend = () => {
-                              setScreenshotFileBase64(reader.result as string);
-                            };
-                            reader.readAsDataURL(file);
-                          }
-                        }}
-                        className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
-                        id="screenshot-uploader"
-                      />
-                      
-                      {!screenshotFileBase64 ? (
-                        <div className="text-center space-y-1.5 pointer-events-none">
-                          <div className="mx-auto w-8 h-8 rounded-full bg-[#E2125B]/5 flex items-center justify-center text-[#E2125B]">
-                            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
-                          </div>
-                          <span className="text-[11px] font-bold text-slate-700 block">গ্যালারি থেকে স্ক্রিনশট নির্বাচন বা ড্র্যাগ করুন</span>
-                          <span className="text-[9px] text-slate-400 block font-medium">সমর্থিত ফরম্যাট: PNG, JPG, JPEG</span>
-                        </div>
-                      ) : (
-                        <div className="w-full relative z-10 flex items-center gap-3">
-                          <img 
-                            src={screenshotFileBase64} 
-                            alt="Screenshot Preview" 
-                            className="w-12 h-12 object-cover rounded-lg border border-slate-200 bg-white"
-                          />
-                          <div className="flex-1 min-w-0">
-                            <span className="text-[10px] font-bold text-slate-700 block truncate">{screenshotFileName || 'uploaded_image.png'}</span>
-                            <span className="text-[8px] text-emerald-600 font-extrabold block uppercase tracking-wide">✓ রেডি (Ready to upload)</span>
-                          </div>
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.preventDefault();
-                              e.stopPropagation();
-                              setScreenshotFileBase64('');
-                              setScreenshotFileName('');
-                            }}
-                            className="p-1.5 rounded-full bg-rose-50 hover:bg-rose-100 text-rose-600 transition-colors cursor-pointer"
-                          >
-                            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"></path></svg>
-                          </button>
-                        </div>
-                      )}
+                      <div>
+                        <label className="text-[10px] font-extrabold text-slate-600 block mb-1 uppercase tracking-wider">
+                          ৪. কোন নাম্বার থেকে পাঠিয়েছেন (Sender)
+                        </label>
+                        <input 
+                          type="text" 
+                          value={adminRefillSender}
+                          onChange={(e) => setAdminRefillSender(e.target.value)}
+                          placeholder="১১ ডিজিটের মোবাইল নম্বর"
+                          required={refillType === 'admin_100'}
+                          className="w-full text-slate-800 text-sm py-2 px-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none font-mono" 
+                        />
+                      </div>
+
+                      <div className="col-span-2 mt-1">
+                        <label className="text-[10px] font-extrabold text-slate-600 block mb-1 uppercase tracking-wider">
+                          ৫. ট্রানজেকশন আইডি (Transaction ID / TxID)
+                        </label>
+                        <input 
+                          type="text" 
+                          value={adminRefillTxnId}
+                          onChange={(e) => setAdminRefillTxnId(e.target.value)}
+                          placeholder="যেমন 8JN7Y6TRDF"
+                          required={refillType === 'admin_100'}
+                          className="w-full text-slate-800 text-sm py-2.5 px-3 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none font-mono" 
+                        />
+                      </div>
                     </div>
-
-                    {/* Quick Simulated Receipt button for easy testing */}
-                    {!screenshotFileBase64 && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          setScreenshotFileName('simulated_receipt_success.png');
-                          setScreenshotFileBase64('https://images.unsplash.com/photo-1559526324-4b87b5e36e44?q=50&w=300&auto=format&fit=crop');
-                          triggerMessage('টেস্টিং ডেমো স্ক্রিনশট সংযুক্ত করা হয়েছে!', 'info');
-                        }}
-                        className="mt-1.5 text-[10px] text-indigo-700 hover:underline font-bold flex items-center gap-1 cursor-pointer bg-slate-50 border border-slate-150 rounded-lg py-1 px-2 w-max"
-                      >
-                        <span>🪄 ডেমো রিফিল স্ক্রিনশট সিমুলেট করুন (Quick Test)</span>
-                      </button>
-                    )}
-                  </div>
+                  )}
 
                   <button 
                     type="submit"
-                    className="w-full py-3 bg-[#E2125B] hover:bg-rose-600 text-white font-bold text-sm rounded-xl transition-all shadow-md cursor-pointer text-center"
+                    className="w-full py-3 bg-[#E2125B] hover:bg-rose-600 text-white font-bold text-sm rounded-xl transition-all shadow-md cursor-pointer text-center font-bold"
                   >
-                    ওয়ালেট রিফিল আবেদন পাঠান (৳{agentCashAmount || '0'} BDT)
+                    {refillType === 'admin_100' 
+                      ? `১০০% কমিশন রিফিল অনুরোধ পাঠান (৳${agentCashAmount || '0'} BDT)` 
+                      : `সুপার এজেন্টের কাছে রিফিল অনুরোধ পাঠান (৳${agentCashAmount || '0'} BDT)`}
                   </button>
                 </form>
+
+                {/* Important Instructions Box under the submit button */}
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 text-xs text-left space-y-1.5 leading-relaxed">
+                  <p className="font-extrabold text-slate-800 flex items-center gap-1.5">
+                    <Info className="w-4 h-4 text-indigo-650 shrink-0" />
+                    গুরুত্বপূর্ণ গাইডলাইন ও নিয়মাবলী:
+                  </p>
+                  {refillType === 'super_agent' ? (
+                    <div className="text-[11px] font-semibold text-slate-650 space-y-1 pl-1">
+                      <p>১. রিফিল আবেদন সাবমিটের সময় আপনার <strong>সঠিক এজেন্ট আইডি</strong> এবং আপনি যতটুকু টাকা নিতে চান তা পূরণ করে আবেদন করুন।</p>
+                      <p className="text-indigo-800 font-bold">২. অনুরোধ পাঠানোর পর প্লেব্যাক বা পেমেন্ট স্ক্রিনশটটি সফলভাবে ভেরিফাই করাতে অবশ্যই আপনার "অফিশিয়াল টেলিগ্রামে" অ্যাডমিনদের নিকট পাঠিয়ে নিশ্চিত করুন।</p>
+                    </div>
+                  ) : (
+                    <div className="text-[11px] font-semibold text-slate-650 space-y-1 pl-1">
+                      <p>১. খেলোয়াড়দের উইথড্র বা ডিপোজিটে ১০০% নিজের টাকা থেকে কমিশন জেনারেট করার জন্য উপরে প্রদর্শিত বিকাশ বা নগদে নিজের পকেট থেকে অর্থ ক্যাশ-ইন সম্পন্ন করুন।</p>
+                      <p className="text-[#E2125B] font-bold">২. এই ফর্ম সম্পূর্ণ সাবমিট করার পর উক্ত টাকা পাঠানোর পেমেন্ট রিসিট বা অনুরোধের স্ক্রিনশটটি কপি করে সরাসরি Super Admin এর নিকট (Telegram / Inbox) পাঠিয়ে রিফিল দ্রুত ও ১০০% নিশ্চিত করুন।</p>
+                    </div>
+                  )}
+                </div>
 
                 {/* Refills histories */}
                 <div className="border-t border-slate-100 pt-3 space-y-2">
@@ -2736,18 +2926,23 @@ export default function App() {
                           withdrawSource === 'commission' ? 'bg-[#E2125B]/5 border-[#E2125B] text-[#E2125B] ring-2 ring-[#E2125B]/10' : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
                         }`}
                       >
-                        <span>কমিশন ব্যালেন্স</span>
+                        <span className="flex items-center gap-1">
+                          <span>কমিশন ব্যালেন্স</span>
+                          <span className="text-[8px] bg-emerald-100 text-emerald-805 px-1 py-0.2 rounded font-black uppercase">উত্তোলনযোগ্য</span>
+                        </span>
                         <span className="text-[10px] font-bold mt-0.5">৳{profile?.commissionBalance}</span>
                       </button>
                       <button
                         type="button"
-                        onClick={() => setWithdrawSource('wallet')}
-                        className={`py-2.5 px-3 rounded-xl text-[11px] font-black border transition-all text-center flex flex-col items-center justify-center cursor-pointer ${
-                          withdrawSource === 'wallet' ? 'bg-[#E2125B]/5 border-[#E2125B] text-[#E2125B] ring-2 ring-[#E2125B]/10' : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
-                        }`}
+                        disabled={true}
+                        className="py-2.5 px-3 rounded-xl text-[11px] font-black border transition-all text-center flex flex-col items-center justify-center cursor-not-allowed opacity-60 bg-slate-100 border-slate-250 text-slate-400"
+                        title="মূল ওয়ালেট ব্যালেন্স থেকে কোনো প্রকার উত্তোলন অনুমোদিত নয়"
                       >
-                        <span>মূল ওয়ালেট ব্যালেন্স</span>
-                        <span className="text-[10px] font-bold mt-0.5">৳{profile?.walletBalance}</span>
+                        <span className="flex items-center gap-1.5 text-slate-500">
+                          <span>মূল ওয়ালেট ব্যালেন্স</span>
+                          <span className="text-[8px] bg-rose-100 text-rose-600 px-1 py-0.2 rounded font-black uppercase">উত্তোলন বন্ধ</span>
+                        </span>
+                        <span className="text-[10px] font-bold mt-0.5 text-slate-400">৳{profile?.walletBalance}</span>
                       </button>
                     </div>
                   </div>
@@ -2789,22 +2984,79 @@ export default function App() {
                   </div>
 
                   <div>
-                    <label className="text-[10px] font-bold text-slate-600 block mb-1">উত্তোলন টাকার পরিমাণ (৳)</label>
+                    <div className="flex justify-between items-center mb-1">
+                      <label className="text-[10px] font-bold text-slate-600 block">উত্তোলন টাকার পরিমাণ (৳)</label>
+                      <span className="text-[9px] font-black text-rose-600">
+                        সর্বোচ্চ ৩০% লিমিট: ৳{Math.floor((profile?.commissionBalance || 0) * 0.3 * 100) / 100}
+                      </span>
+                    </div>
                     <input 
                       type="number" 
                       value={withdrawAmount}
                       onChange={(e) => setWithdrawAmount(e.target.value)}
                       placeholder="৳ টাকার পরিমাণ"
                       required
-                      className="w-full text-slate-800 text-sm py-2.5 px-4 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none" 
+                      disabled={withdrawSource === 'commission' && !!lastCommissionWithdraw}
+                      className={`w-full text-slate-800 text-sm py-2.5 px-4 rounded-xl border border-slate-200 bg-slate-50 focus:outline-none ${
+                        withdrawSource === 'commission' && !!lastCommissionWithdraw ? 'opacity-50 cursor-not-allowed' : ''
+                      }`} 
                     />
                   </div>
 
+                  {withdrawSource === 'commission' && (
+                    <div className="bg-indigo-50/80 border border-indigo-150 rounded-2xl p-3.5 text-xs space-y-2">
+                      <div className="flex items-center gap-1.5 font-extrabold text-indigo-900">
+                        <Info className="w-4 h-4 text-indigo-650 flex-shrink-0" />
+                        <span>কমিশন উত্তোলনের নিয়মাবলী ও সীমাবদ্ধতা:</span>
+                      </div>
+                      <div className="text-[11px] leading-relaxed text-indigo-950 font-medium pl-1 space-y-1.5">
+                        <p>📢 সকল সম্মানিত ওয়ালেট এজেন্টদের জানানো যাচ্ছে যে, <strong>সাপ্তাহিক সিকিউরিটি ও কমিশন পলিসি অনুযায়ী নতুন এবং অত্যন্ত গুরুত্বপূর্ণ নিয়মাবলি প্রযোজ্যঃ</strong></p>
+                        <ul className="list-disc list-inside space-y-1.5 text-indigo-900 font-semibold pl-1">
+                          <li>
+                            <span className="text-indigo-950 font-extrabold">সর্বোচ্চ ৩০% উত্তোলন সীমাঃ</span> আপনি আপনার মোট অর্জিত কমিশন ব্যালেন্সের সর্বোচ্চ <span className="text-[#E2125B] font-black">৩০%</span> (৳{Math.floor((profile?.commissionBalance || 0) * 0.3 * 100) / 100}) পিআউট হিসেবে উত্তোলন করতে পারবেন।
+                          </li>
+                          <li>
+                            <span className="text-rose-700 font-black">অবশিষ্ট ৭০% সুপার এজেন্টের প্রাপ্য আদায়ঃ</span> অবশিষ্টাংশ <span className="text-rose-700 font-extrabold">৭০% অর্থ Super Agent কমিশন</span> হিসেবে নির্ধারিত। যেহেতু ওয়ালেট এজেন্টদের মেইন ব্যালেন্স/মূল ওয়ালেটে সরাসরি Super Agent টাকা/টোকেন সরবরাহ করেন, তাই অবশিষ্ট ৭০% কমিশন সুপার এজেন্টের পাওনা আদায় বা প্রাপ্য হিসেবে স্বয়ংক্রিয়ভাবে সমন্বয় ও কর্তন করা হয়।
+                          </li>
+                          <li>
+                            <span className="text-emerald-700 font-black">১০০% কমিশন উত্তোলনের শর্তঃ</span> যদি এজেন্টরা সম্পূর্ণ <span className="text-emerald-700 font-extrabold">১০০% কমিশন</span> উত্তোলন করতে চান, তবে এজেন্টদের অবশ্যই <strong>নিজেদের ব্যক্তিগত অর্থ/পুঁজি থেকে</strong> ব্যালেন্স নিয়ে কমিশন উপার্জন করতে হবে। অন্যথায় সুপার এজেন্টের দেওয়া পুঁজিতে কাজ করলে আয়ের <span className="text-rose-700 font-black">৭০%</span> কমিশন Super Agent পাবেন।
+                          </li>
+                          <li>
+                            <span className="text-indigo-950 font-extrabold">সাপ্তাহিক ১ বার লিমিটঃ</span> প্রত্যেক ওয়ালেট এজেন্ট প্রতি সপ্তাহে কেবল একবার (১ বার) কমিশন উত্তোলন বা সাবমিশন করার সুযোগ পাবেন। এক আবেদনের পর পরবর্তী আবেদনের জন্য 7 দিন অপেক্ষা করতে হবে।
+                          </li>
+                          <li>
+                            <span className="text-amber-800 font-black">মূল ওয়ালেট উইথড্র বন্ধঃ</span> সিস্টেম পলিসিসংক্রান্ত কারণে <strong>মূল ওয়ালেট ব্যালেন্স থেকে কোনো প্রকার ক্যাশ বা কমিশন উত্তোলন সম্পূর্ণ বন্ধ রয়েছে।</strong> মূল ওয়ালেট কেবল খেলোয়াড়দের ডিপোজিট রিকোয়েস্ট পাস করার জন্য ব্যবহৃত হবে।
+                          </li>
+                        </ul>
+                      </div>
+                    </div>
+                  )}
+
+                  {withdrawSource === 'commission' && lastCommissionWithdraw && (
+                    <div className="bg-rose-50 border border-rose-200 text-rose-950 rounded-2xl p-3.5 text-xs space-y-1">
+                      <p className="font-extrabold flex items-center gap-1 text-rose-800">
+                        <span className="w-1.5 h-1.5 rounded-full bg-rose-600 animate-pulse"></span>
+                        সাপ্তাহিক কমিশন উত্তোলন সীমাবদ্ধতা সক্রিয়
+                      </p>
+                      <p className="font-semibold text-[11px] leading-relaxed text-rose-900">
+                        আপনি প্রতি সপ্তাহে কেবল একবারই কমিশন ব্যালেন্স উত্তোলন করতে পারবেন। আপনার সর্বশেষ সফল আবেদনটি ছিল {new Date(lastCommissionWithdraw.createdAt).toLocaleDateString('bn-BD', { day: 'numeric', month: 'long', year: 'numeric' })} তারিখে।
+                      </p>
+                      <div className="text-[10px] font-semibold text-rose-700 bg-rose-100 px-2 py-0.5 rounded border border-rose-200 w-max mt-1">
+                        পরবর্তী উত্তোলন সম্ভবঃ {new Date(new Date(lastCommissionWithdraw.createdAt).getTime() + 7 * 24 * 60 * 60 * 1000).toLocaleDateString('bn-BD', { day: 'numeric', month: 'long', year: 'numeric' })} তারিখের পর।
+                      </div>
+                    </div>
+                  )}
+
                   <button 
                     type="submit"
-                    className="w-full py-3 bg-[#E2125B] hover:bg-rose-600 text-white font-bold text-sm rounded-xl transition-all shadow-md cursor-pointer"
+                    disabled={withdrawSource === 'commission' && !!lastCommissionWithdraw}
+                    className={`w-full py-3 font-bold text-sm rounded-xl transition-all shadow-md text-center ${
+                      withdrawSource === 'commission' && !!lastCommissionWithdraw
+                        ? 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                        : 'bg-[#E2125B] hover:bg-rose-600 text-white cursor-pointer'
+                    }`}
                   >
-                    {withdrawSource === 'commission' ? 'কমিশন পেআউট সাবমিট করুন' : 'মুল ওয়ালেট পেআউট সাবমিট করুন'}
+                    কমিশন পেআউট সাবমিট করুন
                   </button>
                 </form>
 
